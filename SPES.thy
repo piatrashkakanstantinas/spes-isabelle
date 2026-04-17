@@ -7,7 +7,7 @@ datatype sql_expr = Column nat | SConst nat | Null | Bin sql_expr op sql_expr
 datatype logic = LAnd | LOr
 datatype sql_pred = IsNull sql_expr | Not sql_pred | BinL sql_pred logic sql_pred
 
-datatype query = Table string | Project query "sql_expr list" | Select query sql_pred
+datatype query = Table string | Project query "sql_expr list" | Select query sql_pred | Union "query list"
 
 datatype svalue = SNull | SNat nat
 type_synonym row = "svalue list"
@@ -34,12 +34,15 @@ fun wellformed_sql_pred :: "sql_pred \<Rightarrow> nat \<Rightarrow> bool" where
 fun query_output_length :: "query \<Rightarrow> nat" where
 "query_output_length (Table t) = schema t" |
 "query_output_length (Project _ s) = length s" |
-"query_output_length (Select q _) = query_output_length q"
+"query_output_length (Select q _) = query_output_length q" |
+"query_output_length (Union []) = 0" |
+"query_output_length (Union (x#xs)) = query_output_length x"
 
 fun wellformed_query :: "query \<Rightarrow> bool" where
 "wellformed_query (Table _) = True" |
 "wellformed_query (Project q s) = (wellformed_query q \<and> (\<forall>sv\<in>set s. wellformed_sql_expr sv (query_output_length q)))" |
-"wellformed_query (Select q c) = (wellformed_query q \<and> (wellformed_sql_pred c (query_output_length q)))"
+"wellformed_query (Select q c) = (wellformed_query q \<and> (wellformed_sql_pred c (query_output_length q)))" |
+"wellformed_query (Union qs) = (\<exists>k. \<forall>q\<in> set qs. wellformed_query q \<and> query_output_length q = k)"
 
 datatype fol_expr = Var nat | Const nat | Neg fol_expr | And fol_expr fol_expr |
   Or fol_expr fol_expr | Eq fol_expr fol_expr | FPlus fol_expr fol_expr | FMinus fol_expr fol_expr
@@ -132,7 +135,8 @@ definition select :: "sql_pred \<Rightarrow> table \<Rightarrow> table" where
 fun eval_query :: "query \<Rightarrow> db \<Rightarrow> table" where
 "eval_query (Table t) db = db t" |
 "eval_query (Project q s) db = project s (eval_query q db)" |
-"eval_query (Select q c) db = select c (eval_query q db)"
+"eval_query (Select q c) db = select c (eval_query q db)" |
+"eval_query (Union qs) db = sum_mset (mset (map (\<lambda>q. eval_query q db) qs))"
 
 fun init_tuple :: "nat \<Rightarrow> nat \<Rightarrow> symbolic_column list" where
 "init_tuple _ 0 = []" |
@@ -400,6 +404,24 @@ next
 next
   case ("4_8" vb vc v va)
   then show ?case by simp
+next
+  case ("4_9" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_10" vb v va)
+  then show ?case by simp
+next
+  case ("4_11" vb v va)
+  then show ?case by simp
+next
+  case ("4_12" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_13" vb v va)
+  then show ?case by simp
+next
+  case ("4_14" uu v)
+  then show ?case by simp
 qed
 
 lemma eval_qpsr_table_filter:
@@ -427,8 +449,6 @@ lemma eval_qpsr_table_eq_cond:
   assumes "\<forall>env. fol_eval c1 env = fol_eval c2 env"
   shows "\<forall>env. eval_qpsr_table c c1 env = eval_qpsr_table c c2 env"
   using assms eval_qpsr_table_def include_qpsr_row_def by presburger
-
-(*eval_symbolic_column ((const_expr cols) sv) envr = project_single sv (map (\<lambda>col. eval_symbolic_column col envr) cols)*)
 
 lemma veri_select_correct4:
   assumes "wellformed_sql_pred c (length cols)"
@@ -606,6 +626,24 @@ next
   then show ?case by simp
 next
   case ("4_8" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_9" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_10" vb v va)
+  then show ?case by simp
+next
+  case ("4_11" vb v va)
+  then show ?case by simp
+next
+  case ("4_12" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_13" vb v va)
+  then show ?case by simp
+next
+  case ("4_14" uu v)
   then show ?case by simp
 qed
 
