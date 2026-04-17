@@ -5,7 +5,7 @@ begin
 datatype op = Plus | Minus
 datatype sql_expr = Column nat | SConst nat | Null | Bin sql_expr op sql_expr
 
-datatype query = Table string | Select query "sql_expr list"
+datatype query = Table string | Project query "sql_expr list"
 
 datatype svalue = SNull | SNat nat
 type_synonym row = "svalue list"
@@ -26,11 +26,11 @@ fun wellformed_sql_expr :: "sql_expr \<Rightarrow> nat \<Rightarrow> bool" where
 
 fun query_output_length :: "query \<Rightarrow> nat" where
 "query_output_length (Table t) = schema t" |
-"query_output_length (Select _ s) = length s"
+"query_output_length (Project _ s) = length s"
 
 fun wellformed_query :: "query \<Rightarrow> bool" where
 "wellformed_query (Table _) = True" |
-"wellformed_query (Select q s) = (wellformed_query q \<and> (\<forall>sv\<in>set s. wellformed_sql_expr sv (query_output_length q)))"
+"wellformed_query (Project q s) = (wellformed_query q \<and> (\<forall>sv\<in>set s. wellformed_sql_expr sv (query_output_length q)))"
 
 datatype fol_expr = Var nat | Const nat | Neg fol_expr | And fol_expr fol_expr |
   Or fol_expr fol_expr | Eq fol_expr fol_expr | FPlus fol_expr fol_expr | FMinus fol_expr fol_expr
@@ -96,21 +96,21 @@ fun eval_op :: "op \<Rightarrow> svalue \<Rightarrow> svalue \<Rightarrow> svalu
 "eval_op op (SNat n1) (SNat n2) = SNat (op_op op n1 n2)" |
 "eval_op _ _ _ = SNull"
 
-fun select_single :: "sql_expr \<Rightarrow> row \<Rightarrow> svalue" where
-"select_single (Column i) r = r ! i" |
-"select_single (SConst v) _ = SNat v" |
-"select_single Null _ = SNull" |
-"select_single (Bin e1 op e2) r = eval_op op (select_single e1 r) (select_single e2 r)"
+fun project_single :: "sql_expr \<Rightarrow> row \<Rightarrow> svalue" where
+"project_single (Column i) r = r ! i" |
+"project_single (SConst v) _ = SNat v" |
+"project_single Null _ = SNull" |
+"project_single (Bin e1 op e2) r = eval_op op (project_single e1 r) (project_single e2 r)"
 
-definition select_row :: "sql_expr list \<Rightarrow> row \<Rightarrow> row" where
-"select_row s r \<equiv> map (\<lambda>sv. select_single sv r) s"
+definition project_row :: "sql_expr list \<Rightarrow> row \<Rightarrow> row" where
+"project_row s r \<equiv> map (\<lambda>sv. project_single sv r) s"
 
-definition select :: "sql_expr list \<Rightarrow> table \<Rightarrow> table" where
-"select s t \<equiv> image_mset (select_row s) t"
+definition project :: "sql_expr list \<Rightarrow> table \<Rightarrow> table" where
+"project s t \<equiv> image_mset (project_row s) t"
 
 fun eval_query :: "query \<Rightarrow> db \<Rightarrow> table" where
 "eval_query (Table t) db = db t" |
-"eval_query (Select q s) db = select s (eval_query q db)"
+"eval_query (Project q s) db = project s (eval_query q db)"
 
 fun init_tuple :: "nat \<Rightarrow> nat \<Rightarrow> symbolic_column list" where
 "init_tuple _ 0 = []" |
@@ -135,12 +135,12 @@ fun const_expr :: "symbolic_column list \<Rightarrow> sql_expr \<Rightarrow> sym
 definition const_expr_list :: "symbolic_column list \<Rightarrow> sql_expr list \<Rightarrow> symbolic_column list" where
 "const_expr_list cols s \<equiv> map (const_expr cols) s"
 
-definition veri_select :: "qpsr \<Rightarrow> sql_expr list \<Rightarrow> sql_expr list \<Rightarrow> qpsr" where
-"veri_select qpsr s1 s2 \<equiv> \<lparr> cols1 = const_expr_list (cols1 qpsr) s1, cols2 = const_expr_list (cols2 qpsr) s2, cond = cond qpsr \<rparr>"
+definition veri_project :: "qpsr \<Rightarrow> sql_expr list \<Rightarrow> sql_expr list \<Rightarrow> qpsr" where
+"veri_project qpsr s1 s2 \<equiv> \<lparr> cols1 = const_expr_list (cols1 qpsr) s1, cols2 = const_expr_list (cols2 qpsr) s2, cond = cond qpsr \<rparr>"
 
 fun veri_card :: "query \<Rightarrow> query \<Rightarrow> qpsr option" where
 "veri_card (Table t1) (Table t2) = veri_table t1 t2" |
-"veri_card (Select q1 s1) (Select q2 s2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> Some (veri_select qpsr s1 s2))" |
+"veri_card (Project q1 s1) (Project q2 s2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> Some (veri_project qpsr s1 s2))" |
 "veri_card _ _ = None"
 
 definition symbolic_col_eq_expr :: "symbolic_column \<Rightarrow> symbolic_column \<Rightarrow> fol_expr" where
@@ -163,7 +163,7 @@ lemma imp_elim:
   by (metis One_nat_def assms bneg.elims bor.elims fol_eval.simps(3,5) gr0_conv_Suc imp_def)
 
 lemma wellformed_query_sub:
-  assumes "wellformed_query (Select q s)"
+  assumes "wellformed_query (Project q s)"
   shows "wellformed_query q"
   by (metis assms wellformed_query.simps(2))
 
@@ -246,9 +246,9 @@ lemma veri_table_correct:
   shows "\<exists>env. eval_qpsr qpsr env = (eval_query (Table t1) db, eval_query (Table t2) db)"
   by (metis assms(1,2) eval_qpsr_def option.distinct(1) option.sel qpsr.ext_inject qpsr.surjective veri_table_def eval_qpsr_table_surj_db)
 
-lemma select_image_mset:
-  shows "select s (image_mset f x) = image_mset (\<lambda>r. select_row s (f r)) x"
-  by (metis (no_types, lifting) ext SPES.select_def empty_iff image_mset.compositionality image_mset_single insert_iff set_mset_add_mset_insert set_mset_empty)
+lemma project_image_mset:
+  shows "project s (image_mset f x) = image_mset (\<lambda>r. project_row s (f r)) x"
+  by (metis (no_types, lifting) ext SPES.project_def empty_iff image_mset.compositionality image_mset_single insert_iff set_mset_add_mset_insert set_mset_empty)
 
 lemma eval_qpsr_row_map:
   shows "eval_qpsr_row (map f x) envr = map (\<lambda>col. eval_symbolic_column (f col) envr) x"
@@ -261,7 +261,7 @@ lemma eval_const_op:
 
 lemma const_expr_correct:
   assumes "wellformed_sql_expr sv (length cols)"
-  shows "eval_symbolic_column ((const_expr cols) sv) envr = select_single sv (map (\<lambda>col. eval_symbolic_column col envr) cols)"
+  shows "eval_symbolic_column ((const_expr cols) sv) envr = project_single sv (map (\<lambda>col. eval_symbolic_column col envr) cols)"
 using assms proof (induct sv)
   case (Column i)
   have "eval_symbolic_column (cols ! i) envr = (map (\<lambda>col. eval_symbolic_column col envr) cols) ! i"
@@ -284,28 +284,28 @@ qed
 
 lemma const_expr_list_correct_row:
   assumes "\<forall>sv \<in> set s. wellformed_sql_expr sv (length cols)"
-  shows "eval_qpsr_row (const_expr_list cols s) envr = select_row s (eval_qpsr_row cols envr)"
-  using const_expr_list_def assms const_expr_correct eval_qpsr_row_def select_row_def by simp
+  shows "eval_qpsr_row (const_expr_list cols s) envr = project_row s (eval_qpsr_row cols envr)"
+  using const_expr_list_def assms const_expr_correct eval_qpsr_row_def project_row_def by simp
 
 lemma const_expr_list_correct_table:
   assumes "\<forall>sv \<in> set s. wellformed_sql_expr sv (length cols)"
-  shows "eval_qpsr_table (const_expr_list cols s) condp env = select s (eval_qpsr_table cols condp env)"
-  by (metis (mono_tags, lifting) assms eval_qpsr_table_def multiset.map_cong select_image_mset const_expr_list_correct_row)
+  shows "eval_qpsr_table (const_expr_list cols s) condp env = project s (eval_qpsr_table cols condp env)"
+  by (metis (mono_tags, lifting) assms eval_qpsr_table_def multiset.map_cong project_image_mset const_expr_list_correct_row)
 
-lemma veri_select_correct:
+lemma veri_project_correct:
   assumes "\<forall>sv \<in> set s1. wellformed_sql_expr sv (length (cols1 qpsr))"
   assumes "\<forall>sv \<in> set s2. wellformed_sql_expr sv (length (cols2 qpsr))"
   assumes "eval_qpsr qpsr env = (x, y)"
-  shows "eval_qpsr (veri_select qpsr s1 s2) env = (select s1 x, select s2 y)"
+  shows "eval_qpsr (veri_project qpsr s1 s2) env = (project s1 x, project s2 y)"
   unfolding eval_qpsr_def
-  using assms eval_qpsr_def veri_select_def const_expr_list_correct_table by auto
+  using assms eval_qpsr_def veri_project_def const_expr_list_correct_table by auto
 
-lemma veri_select_correct_query:
+lemma veri_project_correct_query:
   assumes "\<forall>sv \<in> set s1. wellformed_sql_expr sv (length (cols1 qpsr))"
   assumes "\<forall>sv \<in> set s2. wellformed_sql_expr sv (length (cols2 qpsr))"
   assumes "eval_qpsr qpsr env = (eval_query q1 db, eval_query q2 db)"
-  shows "eval_qpsr (veri_select qpsr s1 s2) env = (eval_query (Select q1 s1) db, eval_query (Select q2 s2) db)"
-  by (simp add: assms(1,2,3) veri_select_correct)
+  shows "eval_qpsr (veri_project qpsr s1 s2) env = (eval_query (Project q1 s1) db, eval_query (Project q2 s2) db)"
+  by (simp add: assms(1,2,3) veri_project_correct)
 
 lemma veri_card_cols_length:
   assumes "wellformed_query q1"
@@ -322,12 +322,12 @@ next
   case (2 q1 s1 q2 s2)
   obtain qpsr where "veri_card q1 q2 = Some qpsr"
     using "2.prems"(3) by fastforce
-  have "length (const_expr_list (cols1 qpsr) s1) = query_output_length (Select q1 s1)"
+  have "length (const_expr_list (cols1 qpsr) s1) = query_output_length (Project q1 s1)"
     using const_expr_list_def by auto
-  have "length (const_expr_list (cols2 qpsr) s2) = query_output_length (Select q2 s2)"
+  have "length (const_expr_list (cols2 qpsr) s2) = query_output_length (Project q2 s2)"
     by (simp add: const_expr_list_def)
   then show ?case
-    using "2.prems"(3) \<open>length (const_expr_list (cols1 qpsr) s1) = query_output_length (Select q1 s1)\<close> \<open>veri_card q1 q2 = Some qpsr\<close> veri_select_def by auto
+    using "2.prems"(3) \<open>length (const_expr_list (cols1 qpsr) s1) = query_output_length (Project q1 s1)\<close> \<open>veri_card q1 q2 = Some qpsr\<close> veri_project_def by auto
 next
   case ("3_1" v va vb)
   then show ?case by simp
@@ -353,7 +353,7 @@ next
   obtain env where "eval_qpsr qpsr env = (eval_query q1 db, eval_query q2 db)"
     using "2.hyps" "2.prems"(2,3) \<open>veri_card q1 q2 = Some qpsr\<close> assms(1) wellformed_query_sub by blast
   then show ?case
-    by (smt (verit) "2.prems"(2,3,4) \<open>veri_card q1 q2 = Some qpsr\<close> option.sel option.simps(5) veri_card.simps(2) veri_select_correct_query wellformed_query.simps(2) veri_card_cols_length)
+    by (smt (verit) "2.prems"(2,3,4) \<open>veri_card q1 q2 = Some qpsr\<close> option.sel option.simps(5) veri_card.simps(2) veri_project_correct_query wellformed_query.simps(2) veri_card_cols_length)
 next
   case ("3_1" v va vb)
   then show ?case by simp
