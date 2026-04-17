@@ -4,7 +4,8 @@ begin
 
 datatype op = Plus | Minus
 datatype sql_expr = Column nat | SConst nat | Null | Bin sql_expr op sql_expr
-datatype sql_pred = IsNull sql_expr
+datatype logic = LAnd | LOr
+datatype sql_pred = IsNull sql_expr | Not sql_pred | BinL sql_pred logic sql_pred
 
 datatype query = Table string | Project query "sql_expr list" | Select query sql_pred
 
@@ -26,7 +27,9 @@ fun wellformed_sql_expr :: "sql_expr \<Rightarrow> nat \<Rightarrow> bool" where
 "wellformed_sql_expr _ _ = True"
 
 fun wellformed_sql_pred :: "sql_pred \<Rightarrow> nat \<Rightarrow> bool" where
-"wellformed_sql_pred (IsNull e) n = wellformed_sql_expr e n"
+"wellformed_sql_pred (IsNull e) n = wellformed_sql_expr e n" |
+"wellformed_sql_pred (Not p) n = wellformed_sql_pred p n" |
+"wellformed_sql_pred (BinL p1 _ p2) n = (wellformed_sql_pred p1 n \<and> wellformed_sql_pred p2 n)"
 
 fun query_output_length :: "query \<Rightarrow> nat" where
 "query_output_length (Table t) = schema t" |
@@ -114,8 +117,14 @@ definition project_row :: "sql_expr list \<Rightarrow> row \<Rightarrow> row" wh
 definition project :: "sql_expr list \<Rightarrow> table \<Rightarrow> table" where
 "project s t \<equiv> image_mset (project_row s) t"
 
+fun eval_l :: "logic \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> bool" where
+"eval_l LAnd = (\<and>)" |
+"eval_l LOr = (\<or>)"
+
 fun satisfies_cond :: "sql_pred \<Rightarrow> row \<Rightarrow> bool" where
-"satisfies_cond (IsNull e) r = (project_single e r = SNull)"
+"satisfies_cond (IsNull e) r = (project_single e r = SNull)" |
+"satisfies_cond (Not p) r = (\<not>satisfies_cond p r)" |
+"satisfies_cond (BinL p1 l p2) r = eval_l l (satisfies_cond p1 r) (satisfies_cond p2 r)"
 
 definition select :: "sql_pred \<Rightarrow> table \<Rightarrow> table" where
 "select c t \<equiv> filter_mset (satisfies_cond c) t"
@@ -151,9 +160,26 @@ definition const_expr_list :: "symbolic_column list \<Rightarrow> sql_expr list 
 definition veri_project :: "qpsr \<Rightarrow> sql_expr list \<Rightarrow> sql_expr list \<Rightarrow> qpsr" where
 "veri_project qpsr s1 s2 \<equiv> \<lparr> cols1 = const_expr_list (cols1 qpsr) s1, cols2 = const_expr_list (cols2 qpsr) s2, cond = cond qpsr \<rparr>"
 
+fun const_logic :: "logic \<Rightarrow> fol_expr \<Rightarrow> fol_expr \<Rightarrow> fol_expr" where
+"const_logic LAnd = And" |
+"const_logic LOr = Or"
+
+fun const_pred :: "symbolic_column list \<Rightarrow> sql_pred \<Rightarrow> fol_expr" where
+"const_pred cols (IsNull e) = is_null (const_expr cols e)" |
+"const_pred cols (Not p) = Neg (const_pred cols p)" |
+"const_pred cols (BinL p1 l p2) = const_logic l (const_pred cols p1) (const_pred cols p2)"
+
+definition veri_select :: "qpsr \<Rightarrow> sql_pred \<Rightarrow> sql_pred \<Rightarrow> qpsr option" where
+"veri_select qpsr c1 c2 \<equiv> let c1' = const_pred (cols1 qpsr) c1; c2' = const_pred (cols2 qpsr) c2 in (
+  if (\<forall>env. fol_eval c1' env = fol_eval c2' env) then
+    Some \<lparr> cols1 = cols1 qpsr, cols2 = cols2 qpsr, cond = And (cond qpsr) c1' \<rparr>
+  else None
+)"
+
 fun veri_card :: "query \<Rightarrow> query \<Rightarrow> qpsr option" where
 "veri_card (Table t1) (Table t2) = veri_table t1 t2" |
 "veri_card (Project q1 s1) (Project q2 s2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> Some (veri_project qpsr s1 s2))" |
+"veri_card (Select q1 c1) (Select q2 c2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> veri_select qpsr c1 c2)" |
 "veri_card _ _ = None"
 
 definition symbolic_col_eq_expr :: "symbolic_column \<Rightarrow> symbolic_column \<Rightarrow> fol_expr" where
@@ -325,7 +351,7 @@ lemma veri_card_cols_length:
   assumes "wellformed_query q2"
   assumes "veri_card q1 q2 = Some qpsr"
   shows "length (cols1 qpsr) = query_output_length q1 \<and> length (cols2 qpsr) = query_output_length q2"
-using assms proof (induct rule: veri_card.induct)
+using assms proof (induct arbitrary: qpsr rule: veri_card.induct)
   case (1 t1 t2)
   have "length (init_tuple 0 (schema t1)) = schema t1"
     by (metis Ex_list_of_length eval_qpsr_row_def length_map init_tuple_surj)
@@ -342,23 +368,187 @@ next
   then show ?case
     using "2.prems"(3) \<open>length (const_expr_list (cols1 qpsr) s1) = query_output_length (Project q1 s1)\<close> \<open>veri_card q1 q2 = Some qpsr\<close> veri_project_def by auto
 next
-  case ("3_1" v va vb)
+  case (3 q1 c1 q2 c2)
+  obtain qpsr where "veri_card q1 q2 = Some qpsr"
+    using "3.prems"(3) by force
+  have "length (cols1 qpsr) = query_output_length q1 \<and> length (cols2 qpsr) = query_output_length q2"
+    using "3.hyps" "3.prems"(1,2) \<open>veri_card q1 q2 = Some qpsr\<close> by auto
+  then have "length (cols1 qpsr) = query_output_length (Select q1 c1) \<and> length (cols2 qpsr) = query_output_length (Select q2 c2)" by simp
+  then show ?case
+    by (smt (verit) "3.prems"(3) \<open>veri_card q1 q2 = Some qpsr\<close> option.distinct(1) option.sel option.simps(5) qpsr.select_convs(1,2) veri_card.simps(3) veri_select_def)
+next
+  case ("4_1" v va vb)
   then show ?case by simp
 next
-  case ("3_2" vb v va)
+  case ("4_2" v va vb vc)
   then show ?case by simp
 next
-  case ("3_3" v va uv)
+  case ("4_3" v va vb)
   then show ?case by simp
 next
-  case ("3_4" vb v va)
+  case ("4_4" v va vb vc)
   then show ?case by simp
 next
-  case ("3_5" vb vc v va)
+  case ("4_5" vb v va)
   then show ?case by simp
 next
-  case ("3_6" uu v va)
+  case ("4_6" vb vc v va)
   then show ?case by simp
+next
+  case ("4_7" vb v va)
+  then show ?case by simp
+next
+  case ("4_8" vb vc v va)
+  then show ?case by simp
+qed
+
+lemma eval_qpsr_table_filter:
+  shows "eval_qpsr_table cols condp (filter_mset f x) = image_mset (eval_qpsr_row cols) (filter_mset (\<lambda>xv. include_qpsr_row condp xv \<and> f xv) x)"
+  by (smt (verit, best) eval_qpsr_table_def filter_filter_mset filter_mset_cong0)
+
+lemma eval_qpsr_table_empty [simp]: "eval_qpsr_table a b {#} = {#}"
+  unfolding eval_qpsr_table_def
+  by simp
+
+lemma include_qpsr_row_and [simp]:
+  "include_qpsr_row (And a b) = (\<lambda>x. include_qpsr_row a x \<and> include_qpsr_row b x)"
+  unfolding include_qpsr_row_def proof
+  fix env
+  show "(0 < fol_eval (And a b) env) = (0 < fol_eval a env \<and> 0 < fol_eval b env)"
+    by (metis band.elims band.simps(2,3) bot_nat_0.not_eq_extremum fol_eval.simps(4) zero_less_one)
+qed
+
+lemma fol_eval_and_intro:
+  assumes "\<forall>env. fol_eval a env = fol_eval b env"
+  shows "\<forall>env. fol_eval (And x a) env = fol_eval (And x b) env"
+  by (simp add: assms)
+
+lemma eval_qpsr_table_eq_cond:
+  assumes "\<forall>env. fol_eval c1 env = fol_eval c2 env"
+  shows "\<forall>env. eval_qpsr_table c c1 env = eval_qpsr_table c c2 env"
+  using assms eval_qpsr_table_def include_qpsr_row_def by presburger
+
+(*eval_symbolic_column ((const_expr cols) sv) envr = project_single sv (map (\<lambda>col. eval_symbolic_column col envr) cols)*)
+
+lemma veri_select_correct4:
+  assumes "wellformed_sql_pred c (length cols)"
+  shows "include_qpsr_row (const_pred cols c) env = satisfies_cond c (eval_qpsr_row cols env)"
+using assms proof (induct c)
+  case (IsNull e)
+  then have wf: "wellformed_sql_expr e (length cols)" by simp
+  have "eval_symbolic_column (const_expr cols e) env
+          = project_single e (eval_qpsr_row cols env)"
+    using const_expr_correct[OF wf] by (simp add: eval_qpsr_row_def)
+  then show ?case
+    by (metis const_pred.simps(1) eval_symbolic_column_def include_qpsr_row_def
+              satisfies_cond.simps(1) svalue.simps(3))
+next
+  case (Not p)
+  from Not.prems have wf: "wellformed_sql_pred p (length cols)" by simp
+  with Not.hyps have IH:
+    "include_qpsr_row (const_pred cols p) env = satisfies_cond p (eval_qpsr_row cols env)"
+    by simp
+  have neg_eq:
+    "(fol_eval (Neg (const_pred cols p)) env > 0)
+       = (\<not> (fol_eval (const_pred cols p) env > 0))"
+    by (cases "fol_eval (const_pred cols p) env") auto
+  show ?case
+    using IH neg_eq by (simp add: include_qpsr_row_def)
+next
+  case (BinL p1 l p2)
+  from BinL.prems have wf1: "wellformed_sql_pred p1 (length cols)"
+                    and wf2: "wellformed_sql_pred p2 (length cols)" by auto
+  from BinL.hyps(1) wf1 have IH1:
+    "include_qpsr_row (const_pred cols p1) env = satisfies_cond p1 (eval_qpsr_row cols env)"
+    by simp
+  from BinL.hyps(2) wf2 have IH2:
+    "include_qpsr_row (const_pred cols p2) env = satisfies_cond p2 (eval_qpsr_row cols env)"
+    by simp
+  have include_or:
+    "include_qpsr_row (Or a b) env = (include_qpsr_row a env \<or> include_qpsr_row b env)" for a b
+    unfolding include_qpsr_row_def
+    by (cases "fol_eval a env"; cases "fol_eval b env") auto
+  show ?case
+  proof (cases l)
+    case LAnd
+    then show ?thesis using IH1 IH2 by simp
+  next
+    case LOr
+    then show ?thesis using IH1 IH2 include_or by simp
+  qed
+qed
+
+lemma veri_select_correct3:
+  assumes "wellformed_sql_pred c (length cols)"
+  shows "eval_qpsr_table cols (And condp (const_pred cols c)) env = select c (eval_qpsr_table cols condp env)"
+  unfolding eval_qpsr_table_def select_def proof -
+  show "image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row (And condp (const_pred cols c))) env) =
+        filter_mset (satisfies_cond c) (image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) env))" proof (induct env)
+    case empty
+    then show ?case by simp
+  next
+    case (add x env)
+    have "image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row (And condp (const_pred cols c))) env) =
+          filter_mset (satisfies_cond c) (image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) env))"
+      using add by blast
+    then have h: "image_mset (eval_qpsr_row cols) (filter_mset (\<lambda>v. include_qpsr_row condp v \<and> include_qpsr_row (const_pred cols c) v) env) =
+          filter_mset (satisfies_cond c) (image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) env))" by simp
+
+
+    have "image_mset (eval_qpsr_row cols) (filter_mset (\<lambda>v. include_qpsr_row condp v \<and> include_qpsr_row (const_pred cols c) v) (add_mset x env)) =
+    filter_mset (satisfies_cond c) (image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) (add_mset x env)))" proof (cases "include_qpsr_row condp x")
+      case True
+      have "image_mset (eval_qpsr_row cols) (filter_mset (\<lambda>v. include_qpsr_row condp v \<and> include_qpsr_row (const_pred cols c) v) (add_mset x env)) =
+    filter_mset (satisfies_cond c) (add_mset (eval_qpsr_row cols x) ((image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) env))))"
+        using True h veri_select_correct4 assms by force
+      then show ?thesis
+        using \<open>image_mset (eval_qpsr_row cols)
+ {#v \<in># add_mset x env.
+  include_qpsr_row condp v \<and> include_qpsr_row (const_pred cols c) v#} =
+filter_mset (satisfies_cond c)
+ (add_mset (eval_qpsr_row cols x)
+   (image_mset (eval_qpsr_row cols)
+     (filter_mset (include_qpsr_row condp) env)))\<close> \<open>image_mset (eval_qpsr_row cols)
+ (filter_mset (include_qpsr_row (And condp (const_pred cols c))) env) =
+filter_mset (satisfies_cond c)
+ (image_mset (eval_qpsr_row cols)
+   (filter_mset (include_qpsr_row condp) env))\<close> by fastforce
+    next
+      case False
+      then show ?thesis
+        by (simp add: h)
+    qed
+    then show "image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row (And condp (const_pred cols c))) (add_mset x env)) =
+    filter_mset (satisfies_cond c) (image_mset (eval_qpsr_row cols) (filter_mset (include_qpsr_row condp) (add_mset x env)))" by simp
+  qed
+qed
+
+lemma veri_select_correct2:
+  assumes "wellformed_sql_pred c1 (length cols1p)"
+  assumes "wellformed_sql_pred c2 (length cols2p)"
+  assumes "eval_qpsr_table cols2p condp env = y"
+  assumes "\<forall>env. fol_eval (const_pred cols1p c1) env = fol_eval (const_pred cols2p c2) env"
+  shows "eval_qpsr_table cols2p (And condp (const_pred cols1p c1)) env = select c2 y"
+proof -
+  have "\<forall>env. fol_eval (And condp (const_pred cols1p c1)) env = fol_eval (And condp (const_pred cols2p c2)) env" using fol_eval_and_intro assms by simp
+  have "eval_qpsr_table cols2p (And condp (const_pred cols2p c2)) env = select c2 (eval_qpsr_table cols2p condp env)" using veri_select_correct3 assms by simp
+  have "eval_qpsr_table cols2p (And condp (const_pred cols1p c1)) env = select c2 (eval_qpsr_table cols2p condp env)"
+    by (metis \<open>\<forall>env. fol_eval (And condp (const_pred cols1p c1)) env = fol_eval (And condp (const_pred cols2p c2)) env\<close>
+        \<open>eval_qpsr_table cols2p (And condp (const_pred cols2p c2)) env = select c2 (eval_qpsr_table cols2p condp env)\<close> eval_qpsr_table_eq_cond)
+  then show ?thesis
+    by (simp add: assms) 
+qed
+
+
+lemma veri_select_correct:
+  assumes "wellformed_sql_pred c1 (length (cols1 qpsr))"
+  assumes "wellformed_sql_pred c2 (length (cols2 qpsr))"
+  assumes "eval_qpsr qpsr env1 = (x, y)"
+  assumes "\<forall>env. fol_eval (const_pred (cols1 qpsr)c1) env = fol_eval (const_pred (cols2 qpsr) c2) env"
+  shows "\<exists>env. eval_qpsr \<lparr> cols1 = cols1 qpsr, cols2 = cols2 qpsr, cond = And (cond qpsr) (const_pred (cols1 qpsr) c1) \<rparr> env = (select c1 x, select c2 y)"
+proof
+  show "eval_qpsr \<lparr>cols1 = cols1 qpsr, cols2 = cols2 qpsr, cond = And (cond qpsr) (const_pred (cols1 qpsr) c1)\<rparr> env1 = (select c1 x, select c2 y)"
+    using assms(1,2) eval_qpsr_def veri_select_correct2 assms by auto
 qed
 
 lemma veri_card_correct:
@@ -380,22 +570,42 @@ next
   then show ?case
     by (smt (verit) "2.prems"(2,3,4) \<open>veri_card q1 q2 = Some qpsr\<close> option.sel option.simps(5) veri_card.simps(2) veri_project_correct_query wellformed_query.simps(2) veri_card_cols_length)
 next
-  case ("3_1" v va vb)
+  case (3 q1 c1 q2 c2)
+  obtain qpsr1 where "veri_card q1 q2 = Some qpsr1"
+    using "3.prems" by fastforce
+  then obtain qpsr2 where "veri_select qpsr1 c1 c2 = Some qpsr2" using "3.prems" by force
+  obtain env1 where "eval_qpsr qpsr1 env1 = (eval_query q1 db, eval_query q2 db)"
+    using "3.hyps" "3.prems"(1,2,3) \<open>veri_card q1 q2 = Some qpsr1\<close> wellformed_query.simps(3) by blast
+  have "\<forall>env. fol_eval (const_pred (cols1 qpsr1)c1) env = fol_eval (const_pred (cols2 qpsr1) c2) env"
+    by (smt (verit, ccfv_SIG) \<open>veri_select qpsr1 c1 c2 = Some qpsr2\<close> option.distinct(1) veri_select_def)
+  have "\<exists>env. eval_qpsr \<lparr> cols1 = cols1 qpsr1, cols2 = cols2 qpsr1, cond = And (cond qpsr1) (const_pred (cols1 qpsr1) c1) \<rparr> env = (select c1 (eval_query q1 db), select c2 (eval_query q2 db))"
+    using "3.prems"(2,3) \<open>\<forall>env. fol_eval (const_pred (cols1 qpsr1) c1) env = fol_eval (const_pred (cols2 qpsr1) c2) env\<close> \<open>eval_qpsr qpsr1 env1 = (eval_query q1 db, eval_query q2 db)\<close> \<open>veri_card q1 q2 = Some qpsr1\<close>
+      veri_card_cols_length veri_select_correct by auto
+  then show ?case
+    by (smt (verit, best) "3.prems"(4) \<open>veri_card q1 q2 = Some qpsr1\<close> eval_query.simps(3) option.distinct(1) option.sel option.simps(5) veri_card.simps(3) veri_select_def)
+next
+  case ("4_1" v va vb)
   then show ?case by simp
 next
-  case ("3_2" vb v va)
+  case ("4_2" v va vb vc)
   then show ?case by simp
 next
-  case ("3_3" v va uv)
+  case ("4_3" v va vb)
   then show ?case by simp
 next
-  case ("3_4" vb v va)
+  case ("4_4" v va vb vc)
   then show ?case by simp
 next
-  case ("3_5" vb vc v va)
+  case ("4_5" vb v va)
   then show ?case by simp
 next
-  case ("3_6" uu v va)
+  case ("4_6" vb vc v va)
+  then show ?case by simp
+next
+  case ("4_7" vb v va)
+  then show ?case by simp
+next
+  case ("4_8" vb vc v va)
   then show ?case by simp
 qed
 
