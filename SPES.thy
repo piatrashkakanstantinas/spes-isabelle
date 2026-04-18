@@ -180,12 +180,6 @@ definition veri_select :: "qpsr \<Rightarrow> sql_pred \<Rightarrow> sql_pred \<
   else None
 )"
 
-fun veri_card :: "query \<Rightarrow> query \<Rightarrow> qpsr option" where
-"veri_card (Table t1) (Table t2) = veri_table t1 t2" |
-"veri_card (Project q1 s1) (Project q2 s2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> Some (veri_project qpsr s1 s2))" |
-"veri_card (Select q1 c1) (Select q2 c2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> veri_select qpsr c1 c2)" |
-"veri_card _ _ = None"
-
 definition symbolic_col_eq_expr :: "symbolic_column \<Rightarrow> symbolic_column \<Rightarrow> fol_expr" where
 "symbolic_col_eq_expr c1 c2 \<equiv> Or (And (is_null c1) (is_null c2)) (And (Eq (val c1) (val c2)) (Eq (is_null c1) (is_null c2)))"
 
@@ -195,7 +189,22 @@ fun symbolic_cols_eq_expr :: "symbolic_column list \<Rightarrow> symbolic_column
 "symbolic_cols_eq_expr _ _ = Const 0"
 
 definition qpsr_is_eq :: "qpsr \<Rightarrow> bool" where
-"qpsr_is_eq qpsr \<equiv> \<forall>env. fol_eval (imp (cond qpsr) (symbolic_cols_eq_expr (cols1 qpsr) (cols2 qpsr))) env > 0"
+"qpsr_is_eq qpsr \<equiv> (length (cols1 qpsr) = length (cols2 qpsr)) \<and> (\<forall>env. fol_eval (imp (cond qpsr) (symbolic_cols_eq_expr (cols1 qpsr) (cols2 qpsr))) env > 0)"
+
+fun veri_card :: "query \<Rightarrow> query \<Rightarrow> qpsr option" and
+    veri_union :: "query list \<Rightarrow> query list \<Rightarrow> qpsr option" where
+"veri_card (Table t1) (Table t2) = veri_table t1 t2" |
+"veri_card (Project q1 s1) (Project q2 s2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> Some (veri_project qpsr s1 s2))" |
+"veri_card (Select q1 c1) (Select q2 c2) = (case veri_card q1 q2 of None \<Rightarrow> None | Some qpsr \<Rightarrow> veri_select qpsr c1 c2)" |
+"veri_card (Union qs1) (Union qs2) = veri_union qs1 qs2" |
+"veri_card _ _ = None" |
+
+"veri_union [] []  = Some \<lparr> cols1 = [], cols2 = [], cond = Const 1 \<rparr>" |
+"veri_union (x#xs) (y#ys) = (case veri_card x y of None \<Rightarrow> None | Some qpsr1 \<Rightarrow> (if qpsr_is_eq qpsr1 then (
+  case veri_union xs ys of None \<Rightarrow> None |
+  Some _ \<Rightarrow> Some \<lparr> cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1 \<rparr>
+) else None))" |
+"veri_union _ _ = None"
 
 definition spes :: "query \<Rightarrow> query \<Rightarrow> bool" where
 "spes q1 q2 \<equiv> case veri_card q1 q2 of None \<Rightarrow> False | Some qpsr \<Rightarrow> qpsr_is_eq qpsr"
@@ -350,12 +359,15 @@ lemma veri_project_correct_query:
   shows "eval_qpsr (veri_project qpsr s1 s2) env = (eval_query (Project q1 s1) db, eval_query (Project q2 s2) db)"
   by (simp add: assms(1,2,3) veri_project_correct)
 
+lemma qpsr_is_eq_:
+  assumes "qpsr_is_eq qpsr"
+  shows "length (cols1 qpsr) = length (cols2 qpsr)"
+  using assms qpsr_is_eq_def by blast
+
 lemma veri_card_cols_length:
-  assumes "wellformed_query q1"
-  assumes "wellformed_query q2"
-  assumes "veri_card q1 q2 = Some qpsr"
-  shows "length (cols1 qpsr) = query_output_length q1 \<and> length (cols2 qpsr) = query_output_length q2"
-using assms proof (induct arbitrary: qpsr rule: veri_card.induct)
+   "\<lbrakk>wellformed_query q1; wellformed_query q2; veri_card q1 q2 = Some qpsr\<rbrakk> \<Longrightarrow> (length (cols1 qpsr) = query_output_length q1) \<and> (length (cols2 qpsr) = query_output_length q2)"
+and veri_union_cols_length: "\<lbrakk>wellformed_query (query.Union qs1); wellformed_query (query.Union qs2); veri_union qs1 qs2 = Some qpsr\<rbrakk> \<Longrightarrow> (length (cols1 qpsr) = query_output_length (query.Union qs1)) \<and> (length (cols2 qpsr) = query_output_length (query.Union qs2))"
+proof (induct arbitrary: qpsr and qpsr rule: veri_card_veri_union.induct)
   case (1 t1 t2)
   have "length (init_tuple 0 (schema t1)) = schema t1"
     by (metis Ex_list_of_length eval_qpsr_row_def length_map init_tuple_surj)
@@ -381,46 +393,95 @@ next
   then show ?case
     by (smt (verit) "3.prems"(3) \<open>veri_card q1 q2 = Some qpsr\<close> option.distinct(1) option.sel option.simps(5) qpsr.select_convs(1,2) veri_card.simps(3) veri_select_def)
 next
-  case ("4_1" v va vb)
+  case (4 qs1 qs2)
   then show ?case by simp
 next
-  case ("4_2" v va vb vc)
+  case ("5_1" v va vb)
   then show ?case by simp
 next
-  case ("4_3" v va vb)
+  case ("5_2" v va vb vc)
   then show ?case by simp
 next
-  case ("4_4" v va vb vc)
+  case ("5_3" v va vb)
   then show ?case by simp
 next
-  case ("4_5" vb v va)
+  case ("5_4" v va vb)
   then show ?case by simp
 next
-  case ("4_6" vb vc v va)
+  case ("5_5" v va vb vc)
   then show ?case by simp
 next
-  case ("4_7" vb v va)
+  case ("5_6" v va vb)
   then show ?case by simp
 next
-  case ("4_8" vb vc v va)
+  case ("5_7" v va)
   then show ?case by simp
 next
-  case ("4_9" vb vc v va)
+  case ("5_8" v va vb)
   then show ?case by simp
 next
-  case ("4_10" vb v va)
+  case ("5_9" v va vb)
   then show ?case by simp
 next
-  case ("4_11" vb v va)
+  case ("5_10" vb v va)
   then show ?case by simp
 next
-  case ("4_12" vb vc v va)
+  case ("5_11" vb vc v va)
   then show ?case by simp
 next
-  case ("4_13" vb v va)
+  case ("5_12" vb v va)
   then show ?case by simp
 next
-  case ("4_14" uu v)
+  case ("5_13" vb v va)
+  then show ?case by simp
+next
+  case ("5_14" vb vc v va)
+  then show ?case by simp
+next
+  case ("5_15" vb v va)
+  then show ?case by simp
+next
+  case ("5_16" va v)
+  then show ?case by simp
+next
+  case ("5_17" va vb v)
+  then show ?case by simp
+next
+  case ("5_18" va vb v)
+  then show ?case by simp
+next
+  case (6 uw)
+  then show ?case by auto
+next
+  case (7 x xs y ys n)
+  have "cols1 n = init_tuple 0 (query_output_length x)"
+    by (smt (verit, del_insts) "7.prems"(3) option.case_eq_if option.distinct(1) option.sel qpsr.select_convs(1) veri_union.simps(2))
+  have "cols2 n = init_tuple 0 (query_output_length x)"
+    by (smt (verit, del_insts) "7.prems"(3) option.case_eq_if option.distinct(1) option.sel qpsr.select_convs(2) veri_union.simps(2))
+  have "query_output_length x = query_output_length y" proof (cases "veri_card x y")
+    case None
+    then show ?thesis
+      using "7.prems"(3) by auto
+  next
+    case (Some qpsr1)
+    have "qpsr_is_eq qpsr1"
+      by (metis (mono_tags, lifting) "7.prems"(3) Some option.distinct(1) option.simps(5) veri_union.simps(2))
+    have "query_output_length x = length (cols1 qpsr1)"
+      by (metis "7.hyps"(1) "7.prems"(1,2) Some list.set_intros(1) wellformed_query.simps(4))
+    have "query_output_length y = length (cols2 qpsr1)"
+      using "7.hyps"(1) "7.prems"(1,2) Some by fastforce
+    then show ?thesis
+      using \<open>qpsr_is_eq qpsr1\<close> \<open>query_output_length x = length (cols1 qpsr1)\<close> qpsr_is_eq_def by fastforce
+  qed
+  have "length (cols1 n) = query_output_length x \<and> length (cols2 n) = query_output_length y"
+    by (metis Ex_list_of_length \<open>cols1 n = init_tuple 0 (query_output_length x)\<close> \<open>cols2 n = init_tuple 0 (query_output_length x)\<close> \<open>query_output_length x = query_output_length y\<close> eval_qpsr_row_def init_tuple_surj_with_cond
+        length_map)
+  then show ?case by simp
+next
+  case ("8_1" v va uz)
+  then show ?case by simp
+next
+  case ("8_2" v va uz)
   then show ?case by simp
 qed
 
@@ -439,6 +500,54 @@ lemma include_qpsr_row_and [simp]:
   show "(0 < fol_eval (And a b) env) = (0 < fol_eval a env \<and> 0 < fol_eval b env)"
     by (metis band.elims band.simps(2,3) bot_nat_0.not_eq_extremum fol_eval.simps(4) zero_less_one)
 qed
+
+lemma symbolic_col_eq_expr_head:
+  assumes "fol_eval (symbolic_cols_eq_expr (x#xs) (y#ys)) envr > 0"
+  shows "fol_eval (symbolic_col_eq_expr x y) envr > 0"
+  by (metis assms band.elims fol_eval.simps(4) gr0_conv_Suc symbolic_cols_eq_expr.simps(2))
+
+lemma symbolic_col_eq_expr_correct:
+  assumes "fol_eval (symbolic_col_eq_expr x y) envr > 0"
+  shows "eval_symbolic_column x envr = eval_symbolic_column y envr"
+proof (cases "fol_eval (And (is_null x) (is_null y)) envr > 0")
+  case True
+  then show ?thesis
+    by (metis band.elims eval_symbolic_column_def fol_eval.simps(4) zero_less_Suc)
+next
+  case False
+  then show ?thesis
+    by (metis (no_types, lifting) assms band.elims bor.simps(1) eval_symbolic_column_def fol_eval.simps(4,5,6) gr0_conv_Suc symbolic_col_eq_expr_def)
+qed
+
+lemma symbolic_cols_eq_expr_correct:
+  assumes "fol_eval (symbolic_cols_eq_expr c1 c2) envr > 0"
+  shows "eval_qpsr_row c1 envr = eval_qpsr_row c2 envr"
+using assms proof (induct rule: symbolic_cols_eq_expr.induct)
+  case 1
+  then show ?case by simp
+next
+  case (2 x xs y ys)
+  then show ?case
+    using eval_qpsr_row_def symbolic_col_eq_expr_correct symbolic_col_eq_expr_head by fastforce
+next
+  case ("3_1" v va)
+  then show ?case by simp
+next
+  case ("3_2" v va)
+  then show ?case by simp
+qed
+
+lemma qpsr_is_eq_rows_eq:
+  assumes "qpsr_is_eq qpsr"
+  assumes "include_qpsr_row (cond qpsr) envr"
+  shows "eval_qpsr_row (cols1 qpsr) envr = eval_qpsr_row (cols2 qpsr) envr"
+  by (meson SPES.imp_elim assms(1,2) include_qpsr_row_def qpsr_is_eq_def symbolic_cols_eq_expr_correct)
+
+lemma eval_qpsr_eq:
+  assumes "eval_qpsr qpsr env = (x, y)"
+  assumes "qpsr_is_eq qpsr"
+  shows "x = y"
+  by (metis assms(1,2) eval_qpsr_def eval_qpsr_table_def filter_mset_eq_conv fst_conv image_mset_cong qpsr_is_eq_rows_eq snd_conv)
 
 lemma fol_eval_and_intro:
   assumes "\<forall>env. fol_eval a env = fol_eval b env"
@@ -559,6 +668,10 @@ proof -
     by (simp add: assms) 
 qed
 
+lemma eval_union_add [simp]:
+  shows "eval_query (Union (x#xs)) db = eval_query (Union xs) db + eval_query x db"
+  by simp
+
 
 lemma veri_select_correct:
   assumes "wellformed_sql_pred c1 (length (cols1 qpsr))"
@@ -571,13 +684,75 @@ proof
     using assms(1,2) eval_qpsr_def veri_select_correct2 assms by auto
 qed
 
-lemma veri_card_correct:
+lemma eval_qpsr_table_plus:
+  assumes "eval_qpsr_table cols condp a = x"
+  assumes "eval_qpsr_table cols condp b = y"
+  shows "eval_qpsr_table cols condp (a + b) = x + y"
+  using assms(1,2) eval_qpsr_table_def by auto
+
+lemma eval_qpsr_plus:
+  assumes "eval_qpsr qpsr a = (x1, x2)"
+  assumes "eval_qpsr qpsr b = (y1, y2)"
+  shows "eval_qpsr qpsr (a + b) = (x1 + y1, x2 + y2)"
+  using assms(1,2) eval_qpsr_def eval_qpsr_table_plus by auto
+
+lemma veri_union_h:
+  assumes "\<forall>r\<in>#x. length r = n"
+  assumes "eval_qpsr \<lparr> cols1 = init_tuple 0 n, cols2 = init_tuple 0 n, cond = Const 1 \<rparr> env1 = (xs, ys)"
+  shows "\<exists>env. eval_qpsr \<lparr> cols1 = init_tuple 0 n, cols2 = init_tuple 0 n, cond = Const 1 \<rparr> env = (x + xs, x + ys)"
+proof -
+  obtain env2 where "eval_qpsr \<lparr> cols1 = init_tuple 0 n, cols2 = init_tuple 0 n, cond = Const 1 \<rparr> env2 = (x, x)"
+    using assms(1) eval_qpsr_def eval_qpsr_table_surj wellformed_table_def by fastforce
+  then have "eval_qpsr \<lparr> cols1 = init_tuple 0 n, cols2 = init_tuple 0 n, cond = Const 1 \<rparr> (env1 + env2) = (x + xs, x + ys)"
+    using assms(2) eval_qpsr_plus by auto
+  show ?thesis
+    by (metis \<open>eval_qpsr
+ \<lparr>cols1 = init_tuple 0 n, cols2 = init_tuple 0 n,
+    cond = Const 1\<rparr>
+ (env1 + env2) =
+(x + xs, x + ys)\<close>)
+qed
+
+lemma query_output_length_h:
   assumes "wellformed_db db"
-  assumes "wellformed_query q1"
-  assumes "wellformed_query q2"
-  assumes "veri_card q1 q2 = Some qpsr"
-  shows "\<exists>env. eval_qpsr qpsr env = (eval_query q1 db, eval_query q2 db)"
-using assms proof (induct arbitrary: qpsr rule: veri_card.induct)
+  assumes "wellformed_query q"
+  shows "\<forall>r\<in>#eval_query q db. length r = query_output_length q"
+using assms proof (induct q arbitrary: db)
+  case (Table x)
+  then show ?case 
+    by (simp add: wellformed_db_def wellformed_table_def)
+next
+  case (Project q s)
+  have "\<forall>x. length (project_row s x) = length s"
+    using project_row_def by auto
+  then have "\<forall>r\<in>#image_mset (project_row s) (eval_query q db). length r = length s"
+    by simp
+  then show ?case
+    using project_def by auto
+next
+  case (Select q x2)
+  then show ?case
+    by (simp add: SPES.select_def)
+next
+  case (Union x)
+  then show ?case using assms proof (induct x)
+    case Nil
+    then show ?case by simp
+  next
+    case (Cons a x)
+    then show ?case by force
+  qed
+qed
+
+lemma union_output_len:
+  assumes "wellformed_query (Union (x#(xx#xxs)))"
+  shows "query_output_length x = query_output_length (Union (xx#xxs))"
+  using assms by force
+
+lemma veri_card_correct:
+   "\<lbrakk>wellformed_db db; wellformed_query q1; wellformed_query q2; veri_card q1 q2 = Some qpsr\<rbrakk> \<Longrightarrow> \<exists>env. eval_qpsr qpsr env = (eval_query q1 db, eval_query q2 db)"
+and veri_union_correct: "\<lbrakk>wellformed_db db; wellformed_query (Union qs1); wellformed_query (Union qs2); veri_union qs1 qs2 = Some qpsr\<rbrakk> \<Longrightarrow> \<exists>env. eval_qpsr qpsr env = (eval_query (Union qs1) db, eval_query (Union qs2) db)"
+proof (induct arbitrary: qpsr db and qpsr db rule: veri_card_veri_union.induct)
   case (1 t1 t2)
   then show ?case
     using veri_table_correct by auto
@@ -586,7 +761,7 @@ next
   obtain qpsr where "veri_card q1 q2 = Some qpsr"
     using "2.prems"(4) by fastforce
   obtain env where "eval_qpsr qpsr env = (eval_query q1 db, eval_query q2 db)"
-    using "2.hyps" "2.prems"(2,3) \<open>veri_card q1 q2 = Some qpsr\<close> assms(1) wellformed_query_sub by blast
+    using "2.hyps" "2.prems"(1,2,3) \<open>veri_card q1 q2 = Some qpsr\<close> wellformed_query.simps(2) by blast
   then show ?case
     by (smt (verit) "2.prems"(2,3,4) \<open>veri_card q1 q2 = Some qpsr\<close> option.sel option.simps(5) veri_card.simps(2) veri_project_correct_query wellformed_query.simps(2) veri_card_cols_length)
 next
@@ -604,96 +779,116 @@ next
   then show ?case
     by (smt (verit, best) "3.prems"(4) \<open>veri_card q1 q2 = Some qpsr1\<close> eval_query.simps(3) option.distinct(1) option.sel option.simps(5) veri_card.simps(3) veri_select_def)
 next
-  case ("4_1" v va vb)
+  case (4 qs1 qs2)
   then show ?case by simp
 next
-  case ("4_2" v va vb vc)
+  case ("5_1" v va vb)
   then show ?case by simp
 next
-  case ("4_3" v va vb)
+  case ("5_2" v va vb vc)
   then show ?case by simp
 next
-  case ("4_4" v va vb vc)
+  case ("5_3" v va vb)
   then show ?case by simp
 next
-  case ("4_5" vb v va)
+  case ("5_4" v va vb)
   then show ?case by simp
 next
-  case ("4_6" vb vc v va)
+  case ("5_5" v va vb vc)
   then show ?case by simp
 next
-  case ("4_7" vb v va)
+  case ("5_6" v va vb)
   then show ?case by simp
 next
-  case ("4_8" vb vc v va)
+  case ("5_7" v va)
   then show ?case by simp
 next
-  case ("4_9" vb vc v va)
+  case ("5_8" v va vb)
   then show ?case by simp
 next
-  case ("4_10" vb v va)
+  case ("5_9" v va vb)
   then show ?case by simp
 next
-  case ("4_11" vb v va)
+  case ("5_10" vb v va)
   then show ?case by simp
 next
-  case ("4_12" vb vc v va)
+  case ("5_11" vb vc v va)
   then show ?case by simp
 next
-  case ("4_13" vb v va)
+  case ("5_12" vb v va)
   then show ?case by simp
 next
-  case ("4_14" uu v)
-  then show ?case by simp
-qed
-
-lemma symbolic_col_eq_expr_head:
-  assumes "fol_eval (symbolic_cols_eq_expr (x#xs) (y#ys)) envr > 0"
-  shows "fol_eval (symbolic_col_eq_expr x y) envr > 0"
-  by (metis assms band.elims fol_eval.simps(4) gr0_conv_Suc symbolic_cols_eq_expr.simps(2))
-
-lemma symbolic_col_eq_expr_correct:
-  assumes "fol_eval (symbolic_col_eq_expr x y) envr > 0"
-  shows "eval_symbolic_column x envr = eval_symbolic_column y envr"
-proof (cases "fol_eval (And (is_null x) (is_null y)) envr > 0")
-  case True
-  then show ?thesis
-    by (metis band.elims eval_symbolic_column_def fol_eval.simps(4) zero_less_Suc)
-next
-  case False
-  then show ?thesis
-    by (metis (no_types, lifting) assms band.elims bor.simps(1) eval_symbolic_column_def fol_eval.simps(4,5,6) gr0_conv_Suc symbolic_col_eq_expr_def)
-qed
-
-lemma symbolic_cols_eq_expr_correct:
-  assumes "fol_eval (symbolic_cols_eq_expr c1 c2) envr > 0"
-  shows "eval_qpsr_row c1 envr = eval_qpsr_row c2 envr"
-using assms proof (induct rule: symbolic_cols_eq_expr.induct)
-  case 1
+  case ("5_13" vb v va)
   then show ?case by simp
 next
-  case (2 x xs y ys)
+  case ("5_14" vb vc v va)
+  then show ?case by simp
+next
+  case ("5_15" vb v va)
+  then show ?case by simp
+next
+  case ("5_16" va v)
+  then show ?case by simp
+next
+  case ("5_17" va vb v)
+  then show ?case by simp
+next
+  case ("5_18" va vb v)
+  then show ?case by simp
+next
+  case 6
+  have "\<exists>env. eval_qpsr qpsr env = ({#}, {#})"
+    by (metis eval_qpsr_def eval_qpsr_table_empty)
+  then show ?case by simp
+next
+  case (7 x xs y ys)
+  obtain qpsr1 where a: "veri_card x y = Some qpsr1"
+    using "7.prems"(4) by fastforce
+  then have "qpsr_is_eq qpsr1"
+    using "7.prems"(4) not_Some_eq by fastforce
+  then obtain qpsr2 where "veri_union xs ys = Some qpsr2"
+    using "7.prems"(4) a by fastforce
+  have "eval_query x db = eval_query y db"
+    by (meson "7.hyps"(1) "7.prems"(1,2,3) \<open>qpsr_is_eq qpsr1\<close> a eval_qpsr_eq list.set_intros(1) wellformed_query.simps(4))
+  have x: "qpsr = \<lparr> cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1 \<rparr>"
+    by (smt (verit, best) "7.prems"(4) option.case_eq_if option.distinct(1) option.inject veri_union.simps(2))
+  have "\<exists>env. eval_qpsr \<lparr> cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1 \<rparr> env = (eval_query (Union xs) db, eval_query (Union ys) db)" proof (cases "xs")
+    case Nil
+    have "ys = []"
+      by (metis \<open>veri_union xs ys = Some qpsr2\<close> is_none_code(2) is_none_simps(1) local.Nil neq_Nil_conv veri_union.simps(4))
+    have "eval_qpsr \<lparr>cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1\<rparr> {#} = ({#}, {#})"
+      using eval_qpsr_def by auto
+    then have "\<exists>env. eval_qpsr \<lparr>cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1\<rparr> env = ({#}, {#})" by metis
+    then show ?thesis
+      by (simp add: \<open>ys = []\<close> local.Nil)
+  next
+    case (Cons xx xxs)
+    obtain yy yys where "ys = yy#yys"
+      by (metis \<open>veri_union xs ys = Some qpsr2\<close> list.exhaust local.Cons option.distinct(1) veri_union.simps(3))
+    have "query_output_length x = query_output_length (Union xs)"
+      using "7.prems"(2) local.Cons union_output_len by blast
+    have "query_output_length y = query_output_length (Union ys)"
+      using "7.prems"(3) \<open>ys = yy # yys\<close> union_output_len by blast
+    have "query_output_length x = query_output_length y"
+      by (metis "7.prems"(2,3) \<open>qpsr_is_eq qpsr1\<close> a list.set_intros(1) qpsr_is_eq_ veri_card_cols_length wellformed_query.simps(4))
+    then show ?thesis
+      by (smt (verit, del_insts) "7.hyps"(2) "7.prems"(1,2,3) \<open>\<And>thesis. (\<And>qpsr2. veri_union xs ys = Some qpsr2 \<Longrightarrow> thesis) \<Longrightarrow> thesis\<close> \<open>qpsr_is_eq qpsr1\<close> \<open>query_output_length x = query_output_length (query.Union xs)\<close>
+          \<open>ys = yy # yys\<close> a list.set_intros(2) local.Cons option.case_eq_if option.distinct(1) query_output_length.simps(5) veri_union.simps(2) wellformed_query.simps(4))
+  qed
+  have z: "\<exists>env. eval_qpsr \<lparr> cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1 \<rparr> env = (eval_query x db + eval_query (Union xs) db, eval_query x db + eval_query (Union ys) db)"
+    by (meson "7.prems"(1,2) \<open>\<exists>env. eval_qpsr \<lparr>cols1 = init_tuple 0 (query_output_length x), cols2 = init_tuple 0 (query_output_length x), cond = Const 1\<rparr> env = (eval_query (query.Union xs) db, eval_query (query.Union ys) db)\<close>
+        list.set_intros(1) query_output_length_h veri_union_h wellformed_query.simps(4))
+  have "\<exists>env. eval_qpsr qpsr env = (eval_query x db + eval_query (Union xs) db, eval_query x db + eval_query (Union ys) db)"
+    using x z by blast
   then show ?case
-    using eval_qpsr_row_def symbolic_col_eq_expr_correct symbolic_col_eq_expr_head by fastforce
+    by (simp add: \<open>eval_query x db = eval_query y db\<close>)
 next
-  case ("3_1" v va)
+  case ("8_1" v va)
   then show ?case by simp
 next
-  case ("3_2" v va)
+  case ("8_2" v va)
   then show ?case by simp
 qed
-
-lemma qpsr_is_eq_rows_eq:
-  assumes "qpsr_is_eq qpsr"
-  assumes "include_qpsr_row (cond qpsr) envr"
-  shows "eval_qpsr_row (cols1 qpsr) envr = eval_qpsr_row (cols2 qpsr) envr"
-  by (meson SPES.imp_elim assms(1,2) include_qpsr_row_def qpsr_is_eq_def symbolic_cols_eq_expr_correct)
-
-lemma eval_qpsr_eq:
-  assumes "eval_qpsr qpsr env = (x, y)"
-  assumes "qpsr_is_eq qpsr"
-  shows "x = y"
-  by (metis assms(1,2) eval_qpsr_def eval_qpsr_table_def filter_mset_eq_conv fst_conv image_mset_cong qpsr_is_eq_rows_eq snd_conv)
 
 theorem spes_sound:
   assumes "wellformed_db db"
