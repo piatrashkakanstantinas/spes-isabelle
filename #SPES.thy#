@@ -350,7 +350,7 @@ lemma veri_project_correct_query:
   shows "eval_qpsr (veri_project qpsr s1 s2) env = (eval_query (Project q1 s1) db, eval_query (Project q2 s2) db)"
   by (simp add: assms(1,2,3) veri_project_correct)
 
-lemma qpsr_is_eq_:
+lemma qpsr_is_eq_cols_length_eq:
   assumes "qpsr_is_eq qpsr"
   shows "length (cols1 qpsr) = length (cols2 qpsr)"
   using assms qpsr_is_eq_def by blast
@@ -729,7 +729,7 @@ next
     have "query_output_length y = query_output_length (Union ys)"
       using "7.prems"(3) \<open>ys = yy # yys\<close> union_output_len by blast
     have "query_output_length x = query_output_length y"
-      by (metis "7.prems"(2,3) \<open>qpsr_is_eq qpsr1\<close> a list.set_intros(1) qpsr_is_eq_ veri_card_cols_length wellformed_query.simps(4))
+      by (metis "7.prems"(2,3) \<open>qpsr_is_eq qpsr1\<close> a list.set_intros(1) qpsr_is_eq_cols_length_eq veri_card_cols_length wellformed_query.simps(4))
     then show ?thesis
       by (smt (verit, del_insts) "7.hyps"(2) "7.prems"(1,2,3) \<open>\<And>thesis. (\<And>qpsr2. veri_union xs ys = Some qpsr2 \<Longrightarrow> thesis) \<Longrightarrow> thesis\<close> \<open>qpsr_is_eq qpsr1\<close> \<open>query_output_length x = query_output_length (query.Union xs)\<close>
           \<open>ys = yy # yys\<close> a list.set_intros(2) local.Cons option.case_eq_if option.distinct(1) query_output_length.simps(5) veri_union.simps(2) wellformed_query.simps(4))
