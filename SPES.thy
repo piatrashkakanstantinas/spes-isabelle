@@ -3,13 +3,13 @@ theory SPES
 begin
 
 datatype op = Plus | Minus
-datatype sql_expr = Column nat | SConst nat | Null | Bin sql_expr op sql_expr
-datatype logic = LAnd | LOr
+datatype sql_expr = Column nat | Const nat | Null | Bin sql_expr op sql_expr
+datatype logic = And | Or
 datatype sql_pred = IsNull sql_expr | Not sql_pred | BinL sql_pred logic sql_pred
 
 datatype query = Table string | Project query "sql_expr list" | Select query sql_pred | Union "query list"
 
-datatype svalue = SNull | SNat nat
+datatype svalue = Null | Nat nat
 type_synonym row = "svalue list"
 type_synonym table = "row multiset"
 type_synonym db = "string \<Rightarrow> table"
@@ -89,7 +89,7 @@ definition include_qpsr_row :: "fol_expr \<Rightarrow> fol_env \<Rightarrow> boo
 "include_qpsr_row condp env \<equiv> fol_eval condp env > 0"
 
 definition eval_symbolic_column :: "symbolic_column \<Rightarrow> fol_env \<Rightarrow> svalue" where
-"eval_symbolic_column c env \<equiv> if fol_eval (is_null c) env > 0 then SNull else SNat (fol_eval (val c) env)"
+"eval_symbolic_column c env \<equiv> if fol_eval (is_null c) env > 0 then Null else Nat (fol_eval (val c) env)"
 
 definition eval_qpsr_row :: "symbolic_column list \<Rightarrow> fol_env \<Rightarrow> row" where
 "eval_qpsr_row cols env \<equiv> map (\<lambda>col. eval_symbolic_column col env) cols"
@@ -105,13 +105,13 @@ fun op_op :: "op \<Rightarrow> (nat \<Rightarrow> nat \<Rightarrow> nat)" where
 "op_op Minus = (-)"
 
 fun eval_op :: "op \<Rightarrow> svalue \<Rightarrow> svalue \<Rightarrow> svalue" where
-"eval_op op (SNat n1) (SNat n2) = SNat (op_op op n1 n2)" |
-"eval_op _ _ _ = SNull"
+"eval_op op (Nat n1) (Nat n2) = Nat (op_op op n1 n2)" |
+"eval_op _ _ _ = Null"
 
 fun project_single :: "sql_expr \<Rightarrow> row \<Rightarrow> svalue" where
 "project_single (Column i) r = r ! i" |
-"project_single (SConst v) _ = SNat v" |
-"project_single Null _ = SNull" |
+"project_single (sql_expr.Const v) _ = Nat v" |
+"project_single sql_expr.Null _ = svalue.Null" |
 "project_single (Bin e1 op e2) r = eval_op op (project_single e1 r) (project_single e2 r)"
 
 definition project_row :: "sql_expr list \<Rightarrow> row \<Rightarrow> row" where
@@ -121,11 +121,11 @@ definition project :: "sql_expr list \<Rightarrow> table \<Rightarrow> table" wh
 "project s t \<equiv> image_mset (project_row s) t"
 
 fun eval_l :: "logic \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> bool" where
-"eval_l LAnd = (\<and>)" |
-"eval_l LOr = (\<or>)"
+"eval_l logic.And = (\<and>)" |
+"eval_l logic.Or = (\<or>)"
 
 fun satisfies_cond :: "sql_pred \<Rightarrow> row \<Rightarrow> bool" where
-"satisfies_cond (IsNull e) r = (project_single e r = SNull)" |
+"satisfies_cond (IsNull e) r = (project_single e r = Null)" |
 "satisfies_cond (Not p) r = (\<not>satisfies_cond p r)" |
 "satisfies_cond (BinL p1 l p2) r = eval_l l (satisfies_cond p1 r) (satisfies_cond p2 r)"
 
@@ -154,8 +154,8 @@ definition const_op :: "op \<Rightarrow> symbolic_column \<Rightarrow> symbolic_
 
 fun const_expr :: "symbolic_column list \<Rightarrow> sql_expr \<Rightarrow> symbolic_column" where
 "const_expr cols (Column i) = cols ! i" |
-"const_expr _ (SConst v) = \<lparr> val = Const v, is_null = Const 0 \<rparr>" |
-"const_expr _ Null = \<lparr> val = Const 0, is_null = Const 1 \<rparr>" |
+"const_expr _ (sql_expr.Const v) = \<lparr> val = Const v, is_null = Const 0 \<rparr>" |
+"const_expr _ sql_expr.Null = \<lparr> val = Const 0, is_null = Const 1 \<rparr>" |
 "const_expr cols (Bin e1 op e2) = const_op op (const_expr cols e1) (const_expr cols e2)"
 
 definition const_expr_list :: "symbolic_column list \<Rightarrow> sql_expr list \<Rightarrow> symbolic_column list" where
@@ -165,8 +165,8 @@ definition veri_project :: "qpsr \<Rightarrow> sql_expr list \<Rightarrow> sql_e
 "veri_project qpsr s1 s2 \<equiv> \<lparr> cols1 = const_expr_list (cols1 qpsr) s1, cols2 = const_expr_list (cols2 qpsr) s2, cond = cond qpsr \<rparr>"
 
 fun const_logic :: "logic \<Rightarrow> fol_expr \<Rightarrow> fol_expr \<Rightarrow> fol_expr" where
-"const_logic LAnd = And" |
-"const_logic LOr = Or"
+"const_logic logic.And = And" |
+"const_logic logic.Or = Or"
 
 fun const_pred :: "symbolic_column list \<Rightarrow> sql_pred \<Rightarrow> fol_expr" where
 "const_pred cols (IsNull e) = is_null (const_expr cols e)" |
@@ -252,8 +252,8 @@ next
   case (Cons a r)
   obtain envr where IH: "eval_qpsr_row (init_tuple (i+2) (length r)) envr = r"
     using Cons.hyps by blast
-  define envr' where "envr' \<equiv> envr(i := (case a of SNat v \<Rightarrow> v | SNull \<Rightarrow> 0),
-                                       i+1 := (case a of SNat _ \<Rightarrow> 0 | SNull \<Rightarrow> 1))"
+  define envr' where "envr' \<equiv> envr(i := (case a of Nat v \<Rightarrow> v | Null \<Rightarrow> 0),
+                                       i+1 := (case a of Nat _ \<Rightarrow> 0 | Null \<Rightarrow> 1))"
   have tail: "eval_qpsr_row (init_tuple (i+2) (length r)) envr' = r"
   proof -
     have "\<forall>j\<ge>i+2. envr' j = envr j" unfolding envr'_def by auto
@@ -262,10 +262,10 @@ next
   qed
   have head: "eval_symbolic_column \<lparr>val = Var i, is_null = Var (i+1)\<rparr> envr' = a"
   proof (cases a)
-    case SNull
+    case Null
     then show ?thesis unfolding envr'_def eval_symbolic_column_def by simp
   next
-    case (SNat v)
+    case (Nat v)
     then show ?thesis unfolding envr'_def eval_symbolic_column_def by simp
   qed
   have "eval_qpsr_row (init_tuple i (Suc (length r))) envr' = a # r"
@@ -311,12 +311,12 @@ using assms proof (induct sv)
     using Column by force
   then show ?case by simp
 next
-  case (SConst x)
+  case (Const x)
   then show ?case
     by (simp add: eval_symbolic_column_def)
 next
   case Null
-  have "eval_symbolic_column \<lparr> val = Const 0, is_null = Const 1 \<rparr> envr = SNull"
+  have "eval_symbolic_column \<lparr> val = Const 0, is_null = Const 1 \<rparr> envr = Null"
     by (simp add: eval_symbolic_column_def)
   then show ?case by simp
 next
@@ -520,10 +520,10 @@ next
     by (cases "fol_eval a env"; cases "fol_eval b env") auto
   show ?case
   proof (cases l)
-    case LAnd
+    case And
     then show ?thesis using IH1 IH2 by simp
   next
-    case LOr
+    case Or
     then show ?thesis using IH1 IH2 include_or by simp
   qed
 qed
